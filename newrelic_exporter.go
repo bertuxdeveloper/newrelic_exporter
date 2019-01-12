@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/log"
@@ -54,9 +55,17 @@ type AppList struct {
 	}
 }
 
-func (a *AppList) get(api *newRelicAPI) error {
+func (a *AppList) get(api *newRelicAPI,appIds string) error {
 	log.Debugf("Requesting application list from %s.", api.server.String())
-	body, err := api.req("/v2/applications.json", "")
+	var requestParamas string
+	if appIds != "" {
+		params := url.Values{}
+		params.Add("filter[ids]", appIds)
+		requestParamas = params.Encode()
+	}
+
+	body, err := api.req("/v2/applications.json", requestParamas )
+	
 	if err != nil {
 		log.Error("Error getting application list: ", err)
 		return err
@@ -266,6 +275,8 @@ type Exporter struct {
 	totalScrapes    prometheus.Counter
 	metrics         map[string]prometheus.GaugeVec
 	api             *newRelicAPI
+	appIds			string
+	metricsName   	string
 }
 
 func NewExporter() *Exporter {
@@ -298,7 +309,7 @@ func (e *Exporter) scrape(ch chan<- Metric) {
 	log.Debugf("Starting new scrape at %d.", now)
 
 	var apps AppList
-	err := apps.get(e.api)
+	err := apps.get(e.api, e.appIds)
 	if err != nil {
 		log.Error(err)
 		e.error.Set(1)
@@ -327,8 +338,24 @@ func (e *Exporter) scrape(ch chan<- Metric) {
 			}
 
 			var data MetricData
+			var filterNames MetricNames
 
-			err = data.get(api, app.ID, names)
+			metricsNameFilter :=  strings.Split(e.metricsName, ",")
+			
+			if len(metricsNameFilter) <= 0 {
+				filterNames = names
+			} else {	
+				
+				for i := range names.Metrics {
+					for j := range metricsNameFilter {
+						if names.Metrics[i].Name  == metricsNameFilter [j] {
+				 			tmpfilterNames := append(filterNames.Metrics, names.Metrics[i] )
+							filterNames.Metrics = tmpfilterNames
+						}
+					}
+				}
+			}
+				err = data.get(api, app.ID, filterNames)
 			if err != nil {
 				log.Error(err)
 				e.error.Set(1)
@@ -487,15 +514,17 @@ func (a *newRelicAPI) httpget(req *http.Request, in []byte) (out []byte, err err
 }
 
 func main() {
-	var server, apikey, listenAddress, metricPath string
+	var server, apikey, listenAddress, appIds, metricsName, metricPath string
 	var period int
 	var timeout time.Duration
 	var err error
 
 	flag.StringVar(&apikey, "api.key", "", "NewRelic API key")
+	flag.StringVar(&appIds, "api.appIds", "", "NewRelic appIds")
+	flag.StringVar(&metricsName, "api.metricsName", "", "NewRelic metricsName")
 	flag.StringVar(&server, "api.server", "https://api.newrelic.com", "NewRelic API URL")
 	flag.IntVar(&period, "api.period", 60, "Period of data to extract in seconds")
-	flag.DurationVar(&timeout, "api.timeout", 5*time.Second, "Period of time to wait for an API response in seconds")
+	flag.DurationVar(&timeout, "api.timeout", 30*time.Second, "Period of time to wait for an API response in seconds")
 
 	flag.StringVar(&listenAddress, "web.listen-address", ":9126", "Address to listen on for web interface and telemetry.")
 	flag.StringVar(&metricPath, "web.telemetry-path", "/metrics", "Path under which to expose metrics.")
@@ -506,6 +535,8 @@ func main() {
 	api.period = period
 	exporter := NewExporter()
 	exporter.api = api
+	exporter.appIds = appIds
+	exporter.metricsName = metricsName
 
 	prometheus.MustRegister(exporter)
 
